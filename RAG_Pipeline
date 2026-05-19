@@ -1,0 +1,187 @@
+from langchain_core.documents import Document
+import os
+from langchain_community.document_loaders.pdf import PyPDFLoader
+"""
+pdf_loader=PyPDFLoader("C:/Users/DeJadhav/OneDrive - Tata Communications/Desktop/Prime batch/DL/RAG/PDF/D.pdf")
+document=pdf_loader.load()
+print(document)
+"""
+#documents
+def load_all_pdf():
+    folder="C:/Users/DeJadhav/OneDrive - Tata Communications/Desktop/Prime batch/DL/RAG/PDF/"
+    num_docs=0
+    all_docs=[]
+
+    for filename in os.listdir(folder):
+        if filename.lower().endswith(".pdf"):
+            pdf_path=os.path.join(folder,filename)
+            loader=PyPDFLoader(pdf_path)
+            doc=loader.load()
+
+            all_docs.extend(doc)
+            num_docs+=1
+
+    #print("total pdf : ",num_docs)
+    #print("total pages : ",len(all_docs))
+    return all_docs
+all_docs=load_all_pdf()
+
+#data ingestion pipeline
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+def split_doc(documents,chunk_size=400,chunk_overlap=50):
+    text_splitter=RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    chunked_docs=text_splitter.split_documents(documents)
+    return chunked_docs
+
+chunks=split_doc(all_docs)
+print("number of chunks : ",len(chunks))
+
+#embedings
+from sentence_transformers import SentenceTransformer
+
+class Embeddingmanager:
+    def __init__(self,model_name="all-MiniLM-L6-v2"):
+        self.model_name=model_name
+        print("loading model...",self.model_name)
+        self.model=SentenceTransformer(self.model_name)
+        print("embedding dimensions",self.model.get_embedding_dimension())
+
+
+    def genrate_embeddings(self,text):
+        embeddings=self.model.encode(text,show_progress_bar=True)
+        return embeddings
+
+embedings_manager=Embeddingmanager()
+
+#vector store
+import chromadb
+import uuid
+
+class vectorestoremanager:
+    def __init__(self,persist_directory="data/vectore_store",collection_name="pdf_docs"):
+        self.collection_name=collection_name
+        self.persist_directory=persist_directory
+        self.collection=None
+        self.client=None
+        self._initialize_store()
+
+    def _initialize_store(self):
+        os.makedirs(self.persist_directory,exist_ok=True)
+        self.client=chromadb.PersistentClient(path=self.persist_directory)
+        self.collection=self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"description": "vector store collection of embeddings for RAG"}
+        )
+
+        print("initialize the vector store with collection: ",self.collection_name)
+        print("docs in collection: ",self.collection.count())
+
+    def add_docs(self,documents,emebeddings):
+        if len(documents)!=len(emebeddings):
+            raise ValueError("Not match")
+        
+        ids=[]
+        all_metadata=[]
+        doc_content=[]
+        emebedding_list=[]
+
+        for i, (doc,emebeddings) in enumerate(zip(documents,emebeddings)):
+            doc_id=f"doc_{uuid.uuid4()}"
+            ids.append(doc_id)
+
+            metadata=dict(doc.metadata)
+            metadata["doc_index"]=i
+            metadata["content_length"]=len(doc.page_content)
+            doc_content.append(doc.page_content)
+            emebedding_list.append(emebeddings.tolist())
+            all_metadata.append(metadata)
+        self.collection.add(
+            ids=ids,
+            metadatas=all_metadata,
+            documents=doc_content,
+            embeddings=emebedding_list
+        )
+        print("total doc added to collection ",len(doc_content))
+        print("docs in collection",self.collection.count())
+
+texts=[doc.page_content for doc in chunks]
+emebeddings=embedings_manager.genrate_embeddings(texts)
+vector_store=vectorestoremanager()
+vector_store.add_docs(chunks,emebeddings)
+
+#retrival piplines
+
+from sklearn.metrics.pairwise import cosine_similarity
+class RAGretriver:
+    def __init__(self,emebedding_manager,vector_store):
+        self.emebedding_manager=emebedding_manager
+        self.vector_store=vector_store
+
+    def retrieve(self,query,top_k=3,score_threshold=2.0):
+        #query-->results
+        query_embeddings=self.emebedding_manager.genrate_embeddings([query])[0]
+        #semantic search
+        results=self.vector_store.collection.query(
+            query_embeddings=[query_embeddings.tolist()],
+            n_results=top_k
+        )
+
+        #cosine similarity
+        retrived_docs=[]
+        if results["documents"] and results["documents"][0]:
+            ids=results["ids"][0]
+            metadatas=results["metadatas"][0]
+            documents=results["documents"][0]
+            distances=results["distances"][0]
+
+            for i ,(id,metadatas,documents,distances) in enumerate(zip(ids,metadatas,documents,distances)):
+                similarity_score=distances
+                print(similarity_score)
+                if similarity_score<=score_threshold:
+                    retrived_docs.append({
+                        "id":id,
+                        "document":documents,
+                        "metadata":metadatas,
+                        "documents":documents,
+                        "similarity_score":similarity_score,
+                        "rank":i+1
+                    })
+            print("length of retrived doc : ",len(retrived_docs))
+        else:
+            print("no doc retrived")
+
+        return retrived_docs
+
+
+rag_retriver=RAGretriver(embedings_manager,vector_store)
+print(rag_retriver.retrieve("Who is deepak?"))
+
+API_KEY_OpenAI="xyzzxvxeds"
+
+from langchain_openai import ChatOpenAI
+
+llm=ChatpenAI(
+    open_api_key=API_KEY_OpenAI
+    model="gpt-5.4"
+    temprature=0.1
+    max_tokens=1024
+)
+
+def genrate_utput(uery,retriver,llm,top_k==3):
+    results=retriver.retrive(query,top_k)
+    context="\n".join(doc["document"] for doc in results]) if results else ""
+    if not context:
+        print("No releavent document found")
+
+    prompt=f"""use given context to genrate the answer for the query
+                context:{context}
+                query:{query}"""
+    resonse=llm.innoke(prompt)
+    return response.content
+
+answer=genrate_output("what is RAG?",rag_retriver,llm)
+print(answer)
